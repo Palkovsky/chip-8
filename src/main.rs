@@ -1,6 +1,8 @@
 use std::default::Default;
+use std::time::Duration;
 use std::collections::HashMap;
 use piston_window::*;
+use rodio::{Sink, Source};
 
 /*
  * TYPE ALIASES & CONSTS
@@ -54,9 +56,54 @@ pub struct Reg {
     pub SP: u8,
 }
 impl Reg {
-    pub fn new() -> Self { Reg { ..Default::default() } }
-}
+    pub fn new() -> Self { 
+        Reg {..Default::default() } 
+    }
 
+    pub fn update_DT(&mut self) {
+        if self.DT > 0 { self.DT -= 1; }
+    }
+
+    pub fn update_ST(&mut self, audio: &Audio) {
+        if self.ST > 0 {
+            if !audio.is_playing() { audio.play(); }
+            self.ST -= 1;
+        }
+
+        if self.ST == 0 { audio.stop(); }
+    }
+}
+/*
+ * AUDIO
+ */
+pub struct Audio {
+    player: rodio::Sink,
+}
+impl Audio {
+    pub fn new() -> Self {
+        let device = rodio::default_output_device().unwrap();
+        let sink = Sink::new(&device);
+
+        sink.set_volume(0.75);
+        Audio { player: sink }
+    }
+
+    pub fn play(&self) {
+        if self.player.len() == 0 {
+            let source = rodio::source::SineWave::new(300).repeat_infinite();
+            self.player.append(source);
+        }
+        self.player.play();
+    }
+
+    pub fn stop(&self) {
+        self.player.pause();
+    }
+
+    pub fn is_playing(&self) -> bool {
+        !self.player.is_paused() && self.player.len() > 0
+    }
+}
 /*
  * DISPLAY
  * Contains sprite drawing logic and image scaling.
@@ -110,6 +157,7 @@ pub struct State {
     pub mem: Mem,
     pub reg: Reg,
     pub display: Display,
+    pub audio: Audio,
     pub key: Keyboard,
 }
 /*
@@ -469,10 +517,11 @@ fn main() {
     let mem = [0u8; RAM_SIZE];
     let reg = Reg::new();
     let display = Display::new(DISPLAY_MODE_WIDTH, DISPLAY_SCALED_WIDTH, DISPLAY_MODE_HEIGHT, DISPLAY_SCALED_HEIGHT);
+    let audio = Audio::new();
     let key = [false; KEYBOARD_SIZE];
 
     // And put them into State struct
-    let mut state = State {mem: mem, reg: reg, display: display, key: key};
+    let mut state = State {mem: mem, reg: reg, display: display, audio: audio, key: key};
 
     // Inst struct let's you execute instructions.
     let mut inst = Inst::new();
@@ -500,7 +549,10 @@ fn main() {
                 state.display.pixel(0, state.display.r_width-1, state.key[0]);
                 state.display.pixel(state.display.r_height/2, state.display.r_width/2, state.key[1]);
 
-                if state.key[2] { inst.exec(0x00E0, &mut state); }
+                if state.key[2] {
+                    state.reg.ST = 180;
+                }
+                state.reg.update_ST(&state.audio)
             },
             /*
              * RENDER
