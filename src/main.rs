@@ -13,6 +13,11 @@ const GP_REG_CNT: usize = 16;
 const KEYBOARD_SIZE: usize = 16;
 const RAM_SIZE: usize = 0x1000;
 
+const DISPLAY_MODE_WIDTH: usize = 128;
+const DISPLAY_MODE_HEIGHT: usize = 64;
+const DISPLAY_SCALED_WIDTH: usize = DISPLAY_MODE_WIDTH * 5;
+const DISPLAY_SCALED_HEIGHT: usize = DISPLAY_MODE_HEIGHT * 5;
+
 /*
  * REGISTERS
  */
@@ -52,12 +57,59 @@ impl Reg {
 }
 
 /*
+ * DISPLAY
+ * Contains sprite drawing logic and image scaling.
+ */
+pub struct Display {
+    r_width: usize,
+    r_height: usize,
+    s_width: usize,
+    s_height: usize,
+    h_strech: f64,
+    v_strech: f64,
+    buffer: Vec<Vec<bool>>,
+}
+
+impl Display {
+    pub fn new(r_width: usize, s_width: usize, r_height: usize, s_height: usize) -> Self {
+        let h_strech = (s_width as f64)/(r_width as f64);
+        let v_strech = (s_height as f64)/(r_height as f64);
+        Display { 
+            r_width: r_width, r_height: r_height,
+            s_width: s_width, s_height: s_height,
+            h_strech: h_strech, v_strech: v_strech, 
+            buffer: vec![vec![false; s_width]; s_height]}
+    }
+
+    pub fn cls(&mut self) { self.buffer = vec![vec![false; self.s_width]; self.s_height]; }
+
+    pub fn pixel(&mut self, row: usize, col: usize, update: bool) -> bool {
+        if row >= self.r_height { panic!("Tried accessing row {}. Only {} rows available.", row, self.r_height); }
+        if col >= self.r_width { panic!("Tried accessing column {}. Only {} columns available.", col, self.r_width); }
+
+        let (x, y) = ((col as f64 * self.h_strech) as usize, (row as f64 * self.v_strech) as usize);
+        let (width_scaled, height_scaled) = (self.h_strech as usize, self.v_strech as usize);
+        let mut overlap = false;
+
+        for i in y..y+height_scaled {
+            for j in x..x+width_scaled {
+               if self.buffer[i][j] != update { overlap = true; }
+               self.buffer[i][j] = update;
+            }
+        }
+
+        overlap
+    }
+}
+
+/*
  * STATE
  * Contains all vartiables needed for executions(regs, memory, dispaly, etc.)
  */
 pub struct State {
     pub mem: Mem,
     pub reg: Reg,
+    pub display: Display,
     pub key: Keyboard,
 }
 
@@ -350,7 +402,7 @@ impl<'a> Inst<'a>{
     }
 }
 
-fn map_keyboard(keyboard: &mut Keyboard, e: Event) {
+fn map_keyboard(keyboard: &mut Keyboard, e: &Event) {
     let translation: HashMap<Key, usize> = vec![
         Key::D1, Key::D2, Key::D3, Key::D4,
         Key::Q, Key::W, Key::E, Key::R,
@@ -369,17 +421,37 @@ fn map_keyboard(keyboard: &mut Keyboard, e: Event) {
 
 fn main() {
     let mem = [0u8; RAM_SIZE];
-    let key = [false; KEYBOARD_SIZE];
     let reg = Reg::new();
+    let display = Display::new(DISPLAY_MODE_WIDTH, DISPLAY_SCALED_WIDTH, DISPLAY_MODE_HEIGHT, DISPLAY_SCALED_HEIGHT);
+    let key = [false; KEYBOARD_SIZE];
 
-    let mut state = State {mem: mem, reg: reg, key: key};
+    let mut state = State {mem: mem, reg: reg, display: display, key: key};
     let mut inst = Inst::new(&mut state);
 
-    let mut window: PistonWindow = WindowSettings::new("Chip-8 Emu", [640, 480])
+    let dimen = Size {width: state.display.s_width as f64, height: state.display.s_height as f64};
+    let mut window: PistonWindow = WindowSettings::new("Chip-8 Emu", dimen)
         .exit_on_esc(true)
+        .resizable(false)
         .build().unwrap();
-    let mut events = Events::new(EventSettings::new()
-        .lazy(true));
 
-    while let Some(e) = events.next(&mut window) { map_keyboard(&mut state.key, e); }
+    let mut events = Events::new(EventSettings::new().lazy(true));
+    while let Some(e) = events.next(&mut window) { 
+        map_keyboard(&mut state.key, &e);
+
+        state.display.pixel(state.display.r_height-1, state.display.r_width-1, state.key[0]);
+        state.display.pixel(state.display.r_height-1, 0, state.key[0]);
+        state.display.pixel(0, 0, state.key[0]);
+        state.display.pixel(0, state.display.r_width-1, state.key[0]);
+
+        window.draw_2d(&e, |context, graphics, _| {
+            clear([0.0; 4], graphics);
+            for i in 0..state.display.s_height {
+                for j in 0..state.display.s_width {
+                    if state.display.buffer[i][j] {
+                        rectangle([1.0; 4], [j as f64, i as f64, 1.0, 1.0], context.transform, graphics);
+                    }
+                }
+            }
+        });
+    }
 }
