@@ -7,7 +7,8 @@ use piston_window::*;
  */
 type Mem = [u8; RAM_SIZE];
 type Keyboard = [bool; KEYBOARD_SIZE];
-type Opcode = u16;
+type Op = u16;
+type ChunkedOp = (Op, Op, Op, Op);
 
 const GP_REG_CNT: usize = 16;
 const KEYBOARD_SIZE: usize = 16;
@@ -101,7 +102,6 @@ impl Display {
         overlap
     }
 }
-
 /*
  * STATE
  * Contains all vartiables needed for executions(regs, memory, dispaly, etc.)
@@ -112,18 +112,15 @@ pub struct State {
     pub display: Display,
     pub key: Keyboard,
 }
-
 /*
  * INSTRUCTIONS
  */
-pub struct Inst<'a> {
-    instructions: HashMap<&'static str, Box<FnMut(Opcode, State)>>,
-    state: &'a mut State,
+pub struct Inst {
+    instructions: HashMap<&'static str, Box<FnMut(ChunkedOp, &mut State)>>,
 }
-
-impl<'a> Inst<'a>{
-    pub fn new(state: &'a mut State) -> Self {
-        let instset: Vec<(&'static str, Box<FnMut(Opcode, State)>)> = vec![
+impl Inst{
+    pub fn new() -> Self {
+        let instset: Vec<(&'static str, Box<FnMut(ChunkedOp, &mut State)>)> = vec![
             /*
             * 0nnn - SYS addr
             * Jump to a machine code routine at nnn.
@@ -135,7 +132,14 @@ impl<'a> Inst<'a>{
              * 00E0 - CLS
              * Clear the display.  
              */
+            ("00E0", Box::new(|_, state| state.display.cls())),
+            /*
+            * 00EE - RET
+            * Return from a subroutine.
+            * The interpreter sets the program counter to the address at the top of the stack, then subtracts 1 from the stack pointer.
+            */
             ("00EE", Box::new(|op, state| {
+
             })),
             /*
              * 1nnn - JP addr
@@ -394,15 +398,57 @@ impl<'a> Inst<'a>{
             })),
         ];
         
-        Inst { instructions: instset.into_iter().collect(), state: state }
+        Inst { instructions: instset.into_iter().collect() }
     }
 
-    pub fn exec(&mut self, op: Opcode) {
-        //self.instructions.get(op)
+    /*
+     * Decodes and executes proper opcode.
+     */
+    pub fn exec(&mut self, op: Op, state: &mut State) {
+        let bits = ((op >> 12) & 0xF, (op >> 8) & 0xF, (op >> 4) & 0xF, op & 0xF);
+        let key = match bits {
+            (0x0, 0x0, 0xE, 0x0) => "00E0",
+            (0x0, 0x0, 0xE, 0xE) => "00EE",
+            (0x1, _, _, _)       => "1nnn",
+            (0x2, _, _, _)       => "2nnn",
+            (0x3, _, _, _)       => "3xkk",
+            (0x4, _, _, _)       => "4xkk",
+            (0x5, _, _, 0x0)     => "5xy0",
+            (0x6, _, _, _)       => "6xkk",
+            (0x7, _, _, _)       => "7xkk",
+            (0x8, _, _, 0x0)     => "8xy0",
+            (0x8, _, _, 0x1)     => "8xy1",
+            (0x8, _, _, 0x2)     => "8xy2",
+            (0x8, _, _, 0x3)     => "8xy3",
+            (0x8, _, _, 0x4)     => "8xy4",
+            (0x8, _, _, 0x5)     => "8xy5",
+            (0x8, _, _, 0x6)     => "8xy6",
+            (0x8, _, _, 0x7)     => "8xy7",
+            (0x8, _, _, 0xE)     => "8xyE",
+            (0x9, _, _, 0x0)     => "9xy0",
+            (0xA, _, _, _)       => "Annn",
+            (0xB, _, _, _)       => "Bnnn",
+            (0xC, _, _, _)       => "Cxkk",
+            (0xD, _, _, _)       => "Dxyn",
+            (0xE, _, 0x9, 0xE)   => "Ex9E",
+            (0xE, _, 0xA, 0x1)   => "ExA1",
+            (0xF, _, 0x0, 0xA)   => "Fx0A",
+            (0xF, _, 0x1, 0x5)   => "Fx15",
+            (0xF, _, 0x1, 0x8)   => "Fx18",
+            (0xF, _, 0x1, 0xE)   => "Fx1E",
+            (0xF, _, 0x2, 0x9)   => "Fx29",
+            (0xF, _, 0x3, 0x3)   => "Fx33",
+            (0xF, _, 0x5, 0x5)   => "Fx55",
+            (0xF, _, 0x6, 0x5)   => "Fx65",
+            _ => panic!("Invalid insturction: {:?}", bits),
+        };
+        let func = self.instructions.get_mut(key)
+            .unwrap_or_else(|| panic!("Invalid insturction: {:?}", bits));
+        func(bits, state);
     }
 }
 
-fn map_keyboard(keyboard: &mut Keyboard, e: &Event) {
+fn map_keyboard(keyboard: &mut Keyboard, inp: &Input) {
     let translation: HashMap<Key, usize> = vec![
         Key::D1, Key::D2, Key::D3, Key::D4,
         Key::Q, Key::W, Key::E, Key::R,
@@ -410,48 +456,69 @@ fn map_keyboard(keyboard: &mut Keyboard, e: &Event) {
         Key::Z, Key::X, Key::C, Key::V,
     ].into_iter().enumerate().map(|(i, key)| (key, i)).collect();
 
-    if let Some(Button::Keyboard(key)) = e.press_args() {
-        if let Some(idx) = translation.get(&key) { keyboard[*idx] = true; }
-    }
-
-    if let Some(Button::Keyboard(key)) = e.release_args() {
-        if let Some(idx) = translation.get(&key) { keyboard[*idx] = false; }
+    if let Input::Button(but) = inp {
+        if let Button::Keyboard(key) = but.button {
+            let pressed = but.state == ButtonState::Press;
+            if let Some(idx) = translation.get(&key) { keyboard[*idx] = pressed; }
+        }
     }
 }
 
 fn main() {
+    // Assemble all VM components
     let mem = [0u8; RAM_SIZE];
     let reg = Reg::new();
     let display = Display::new(DISPLAY_MODE_WIDTH, DISPLAY_SCALED_WIDTH, DISPLAY_MODE_HEIGHT, DISPLAY_SCALED_HEIGHT);
     let key = [false; KEYBOARD_SIZE];
 
+    // And put them into State struct
     let mut state = State {mem: mem, reg: reg, display: display, key: key};
-    let mut inst = Inst::new(&mut state);
 
+    // Inst struct let's you execute instructions.
+    let mut inst = Inst::new();
+    inst.exec(0x00E0, &mut state);
+
+    // Initialize Piston window
     let dimen = Size {width: state.display.s_width as f64, height: state.display.s_height as f64};
     let mut window: PistonWindow = WindowSettings::new("Chip-8 Emu", dimen)
-        .exit_on_esc(true)
-        .resizable(false)
+        .exit_on_esc(true).resizable(false)
         .build().unwrap();
 
-    let mut events = Events::new(EventSettings::new().lazy(true));
-    while let Some(e) = events.next(&mut window) { 
-        map_keyboard(&mut state.key, &e);
+    while let Some(e) = window.next() {
+        match e {
+            /*
+             * INPUT
+             */
+            Event::Input(inp, _) =>  { map_keyboard(&mut state.key, &inp); },
+            /*
+             * UPDATE
+             */
+            Event::Loop(Loop::Update(_args)) => {
+                state.display.pixel(state.display.r_height-1, state.display.r_width-1, state.key[0]);
+                state.display.pixel(state.display.r_height-1, 0, state.key[0]);
+                state.display.pixel(0, 0, state.key[0]);
+                state.display.pixel(0, state.display.r_width-1, state.key[0]);
+                state.display.pixel(state.display.r_height/2, state.display.r_width/2, state.key[1]);
 
-        state.display.pixel(state.display.r_height-1, state.display.r_width-1, state.key[0]);
-        state.display.pixel(state.display.r_height-1, 0, state.key[0]);
-        state.display.pixel(0, 0, state.key[0]);
-        state.display.pixel(0, state.display.r_width-1, state.key[0]);
+                if state.key[2] { inst.exec(0x00E0, &mut state); }
+            },
+            /*
+             * RENDER
+             */
+            Event::Loop(Loop::Render(_args)) => {
+                window.draw_2d(&e, |context, graphics, _| {
+                    clear([0.0; 4], graphics);
 
-        window.draw_2d(&e, |context, graphics, _| {
-            clear([0.0; 4], graphics);
-            for i in 0..state.display.s_height {
-                for j in 0..state.display.s_width {
-                    if state.display.buffer[i][j] {
-                        rectangle([1.0; 4], [j as f64, i as f64, 1.0, 1.0], context.transform, graphics);
+                    for i in 0..state.display.s_height {
+                        for j in 0..state.display.s_width {
+                            if state.display.buffer[i][j] {
+                                rectangle([1.0; 4], [j as f64, i as f64, 1.0, 1.0], context.transform, graphics);
+                            }
+                        }
                     }
-                }
-            }
-        });
+                });
+            },
+            _ => {}
+        }
     }
 }
