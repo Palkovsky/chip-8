@@ -114,43 +114,27 @@ impl Audio {
  * Contains sprite drawing logic and image scaling.
  */
 pub struct Display {
-    r_width: usize,
-    r_height: usize,
-    s_width: usize,
-    s_height: usize,
-    h_strech: f64,
-    v_strech: f64,
+    pub width: usize,
+    pub height: usize,
     buffer: Vec<Vec<bool>>,
 }
 
 impl Display {
-    pub fn new(r_width: usize, s_width: usize, r_height: usize, s_height: usize) -> Self {
-        let h_strech = (s_width as f64)/(r_width as f64);
-        let v_strech = (s_height as f64)/(r_height as f64);
+    pub fn new(width: usize, height: usize) -> Self {
         Display { 
-            r_width: r_width, r_height: r_height,
-            s_width: s_width, s_height: s_height,
-            h_strech: h_strech, v_strech: v_strech, 
-            buffer: vec![vec![false; s_width]; s_height]}
+            width: width, height: height,
+            buffer: vec![vec![false; width]; height]
+        }
     }
 
-    pub fn cls(&mut self) { self.buffer = vec![vec![false; self.s_width]; self.s_height]; }
+    pub fn cls(&mut self) { self.buffer = vec![vec![false; self.width]; self.height]; }
 
     pub fn pixel(&mut self, row: usize, col: usize, update: bool) -> bool {
-        let row = row % self.r_height;
-        let col = col % self.r_width;
-
-        let (x, y) = ((col as f64 * self.h_strech) as usize, (row as f64 * self.v_strech) as usize);
-        let (width_scaled, height_scaled) = (self.h_strech as usize, self.v_strech as usize);
-        let mut overlap = false;
-
-        for i in y..y+height_scaled {
-            for j in x..x+width_scaled {
-               overlap |= self.buffer[i][j] != update;
-               self.buffer[i][j] = update;
-            }
-        }
-
+        let row = row % self.height;
+        let col = col % self.width;
+        
+        let overlap = self.buffer[row][col] != (self.buffer[row][col] ^ update);
+        self.buffer[row][col] ^= update;
         overlap
     }
 }
@@ -314,7 +298,7 @@ impl Inst{
              * If the least-significant bit of Vx is 1, then VF is set to 1, otherwise 0. Then Vx is divided by 2.
              */
             ("8xy6", Box::new(|(_, x, _, _), state| {
-                state.reg.VF = state.reg.V[x] % 2 == 1;
+                state.reg.VF = state.reg.V[x] & 0x01 != 0;
                 state.reg.V[x] = state.reg.V[x] >> 1;
             })),
             /*
@@ -361,7 +345,7 @@ impl Inst{
              */
             ("Bnnn", Box::new(|(_, a, b, c), state| {
                 let addr = ((a << 8) + (b << 4) + c) as u16;
-                state.reg.PC = addr + state.reg.V[0] as u16;
+                state.reg.PC = addr + (state.reg.V[0] as u16);
             })),
             /*
              * Cxkk - RND Vx, byte
@@ -378,12 +362,11 @@ impl Inst{
              * Display n-byte sprite starting at memory location I at (Vx, Vy), set VF = collision.
              * The interpreter reads n bytes from memory, starting at the address stored in I. These bytes are then displayed as sprites on screen at coordinates (Vx, Vy).
              * Sprites are XORed onto the existing screen. If this causes any pixels to be erased, VF is set to 1, otherwise it is set to 0. If the sprite is positioned so part of it is outside the coordinates of the display, it wraps around to the opposite side of the screen.
-             * See instruction 8xy3 for more information on XOR, and section 2.4, Display, for more information on the Chip-8 screen and sprites.
              */
             ("Dxyn", Box::new(|(_, x, y, n), state| {                
                 let addr = state.reg.I as usize;
                 let bytes = &state.mem[addr..addr+n];
-                state.reg.VF = false;
+                state.reg.VF = true;
 
                 let mut mask = 0x80;
                 let mut row = state.reg.V[y] as usize;
@@ -434,7 +417,8 @@ impl Inst{
              * All execution stops until a key is pressed, then the value of that key is stored in Vx.
              */
             ("Fx0A", Box::new(|(_, x, _, _), state| {
-                panic!("Fx0A unsuporrted");
+                //panic!("Fx0A unsuporrted");
+                state.reg.V[x] = 1;
             })),
             /*
              * Fx15 - LD DT, Vx
@@ -592,14 +576,14 @@ fn main() {
     let mem = [0u8; RAM_SIZE];
     let stack = [0u16; STACK_SIZE];
     let reg = Reg::new();
-    let display = Display::new(DISPLAY_MODE_WIDTH, DISPLAY_SCALED_WIDTH, DISPLAY_MODE_HEIGHT, DISPLAY_SCALED_HEIGHT);
+    let display = Display::new(DISPLAY_MODE_WIDTH, DISPLAY_MODE_HEIGHT);
     let audio = Audio::new();
     let key = [false; KEYBOARD_SIZE];
 
     // And put them into State struct
     let mut state = State {mem: mem, stack: stack, reg: reg, display: display, audio: audio, key: key};
 
-    // Load bytes into memory
+    // Load bytes to memory
     for (i, b) in bytes.into_iter().enumerate() { state.mem[ENTRY_POINT as usize + i] = b; }
     state.reg.PC = ENTRY_POINT;
 
@@ -628,7 +612,7 @@ fn main() {
     let mut inst = Inst::new();
 
     // Initialize Piston window
-    let dimen = Size {width: state.display.s_width as f64, height: state.display.s_height as f64};
+    let dimen = Size {width: DISPLAY_SCALED_WIDTH as f64, height: DISPLAY_SCALED_HEIGHT as f64};
     let mut window: PistonWindow = WindowSettings::new("Chip-8 Emu", dimen)
         .exit_on_esc(true).resizable(false)
         .build().unwrap();
@@ -643,21 +627,28 @@ fn main() {
              * UPDATE
              */
             Event::Loop(Loop::Update(_)) => {
+                //for i in 0..5 {
                     state.reg.update_ST(&state.audio);
                     state.reg.update_DT();
                     inst.exec(&mut state);
+                //}
             },
             /*
              * RENDER
              */
-            Event::Loop(Loop::Render(_)) => {      
+            Event::Loop(Loop::Render(_)) => {  
+                let h_strech = (DISPLAY_SCALED_WIDTH as f64)/(state.display.width as f64);
+                let v_strech = (DISPLAY_SCALED_HEIGHT as f64)/(state.display.height as f64);
+    
                 window.draw_2d(&e, |context, graphics, _| {
                     clear([0.0; 4], graphics);
+                    for i in 0..state.display.height {
+                        for j in 0..state.display.width {
+                            let x = (j as f64) * h_strech;
+                            let y = (i as f64) * v_strech;
 
-                    for i in 0..state.display.s_height {
-                        for j in 0..state.display.s_width {
                             if state.display.buffer[i][j] {
-                                rectangle([1.0; 4], [j as f64, i as f64, 1.0, 1.0], context.transform, graphics);
+                                rectangle([1.0; 4], [x, y, h_strech, v_strech], context.transform, graphics);
                             }
                         }
                     }
