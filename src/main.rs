@@ -10,7 +10,7 @@ use rodio::{Sink, Source};
 type Mem = [u8; RAM_SIZE];
 type Keyboard = [bool; KEYBOARD_SIZE];
 type Op = u16;
-type ChunkedOp = (Op, Op, Op, Op);
+type ChunkedOp = (usize, usize, usize, usize);
 
 const GP_REG_CNT: usize = 16;
 const KEYBOARD_SIZE: usize = 16;
@@ -353,8 +353,22 @@ impl Inst{
              * Display n-byte sprite starting at memory location I at (Vx, Vy), set VF = collision.
              * The interpreter reads n bytes from memory, starting at the address stored in I. These bytes are then displayed as sprites on screen at coordinates (Vx, Vy). Sprites are XORed onto the existing screen. If this causes any pixels to be erased, VF is set to 1, otherwise it is set to 0. If the sprite is positioned so part of it is outside the coordinates of the display, it wraps around to the opposite side of the screen. See instruction 8xy3 for more information on XOR, and section 2.4, Display, for more information on the Chip-8 screen and sprites.
              */
-            ("Dxyn", Box::new(|op, state| {
+            ("Dxyn", Box::new(|(_, x, y, n), state| {                
+                let (mut row, mut col) = (y, x);
+                let addr = ((state.reg.V[x] as usize) << 8) + state.reg.V[y] as usize;
+                let bytes = &state.mem[addr..addr+n];
+                let mut mask = 0x80;
 
+                for byte in bytes {                    
+                    while mask != 0 {
+                        state.reg.VF |= state.display.pixel(row, col, byte & mask != 0);
+                        mask = mask >> 1;
+                        col += 1;
+                    }
+                    row += 1;
+                    col = x;
+                    mask = 0x80;
+                }
             })),
             /*
              * Ex9E - SKP Vx
@@ -455,7 +469,7 @@ impl Inst{
     pub fn exec(&mut self, state: &mut State) {
         // Fetch
         let (upper, lower) = (state.mem[state.reg.PC as usize] as u16, state.mem[state.reg.PC as usize+1] as u16);
-        let op = (upper << 8) + lower;
+        let op = ((upper << 8) + lower) as usize;
         state.reg.PC += 2;
 
         // Decode
@@ -542,6 +556,27 @@ fn main() {
     // Load bytes into memory
     for (i, b) in bytes.into_iter().enumerate() { state.mem[ENTRY_POINT as usize + i] = b; }
     state.reg.PC = ENTRY_POINT;
+
+    // Preload hex digits
+    let digits = vec![
+        0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
+        0x20, 0x60, 0x20, 0x20, 0x70, // 1
+        0xF0, 0x10, 0xF0, 0x80, 0xF0, // 2
+        0xF0, 0x10, 0xF0, 0x10, 0xF0, // 3
+        0x90, 0x90, 0xF0, 0x10, 0x10, // 4
+        0xF0, 0x80, 0xF0, 0x10, 0xF0, // 5
+        0xF0, 0x80, 0xF0, 0x90, 0xF0, // 6
+        0xF0, 0x10, 0x20, 0x40, 0x40, // 7
+        0xF0, 0x90, 0xF0, 0x90, 0x90, // 8
+        0xF0, 0x90, 0xF0, 0x10, 0xF0, // 9
+        0xF0, 0x90, 0xF0, 0x90, 0x90, // A
+        0xE0, 0x90, 0xE0, 0x90, 0xE0, // B
+        0xF0, 0x80, 0x80, 0x80, 0xF0, // C
+        0xE0, 0x90, 0x90, 0x90, 0xE0, // D
+        0xF0, 0x80, 0xF0, 0x80, 0xF0, // E
+        0xF0, 0x80, 0xF0, 0x80, 0x80, // F
+    ];
+    for (i, b) in digits.iter().enumerate() { state.mem[i] = *b; }
 
     // Inst struct let's you execute instructions.
     let mut inst = Inst::new();
