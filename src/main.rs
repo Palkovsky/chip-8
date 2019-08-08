@@ -1,6 +1,6 @@
 use std::default::Default;
-use std::time::Duration;
 use std::collections::HashMap;
+use std::{fs, env, path};
 use piston_window::*;
 use rodio::{Sink, Source};
 
@@ -20,6 +20,7 @@ const DISPLAY_MODE_WIDTH: usize = 128;
 const DISPLAY_MODE_HEIGHT: usize = 64;
 const DISPLAY_SCALED_WIDTH: usize = DISPLAY_MODE_WIDTH * 5;
 const DISPLAY_SCALED_HEIGHT: usize = DISPLAY_MODE_HEIGHT * 5;
+const ENTRY_POINT: u16 = 0x200;
 
 /*
  * REGISTERS
@@ -68,9 +69,8 @@ impl Reg {
         if self.ST > 0 {
             if !audio.is_playing() { audio.play(); }
             self.ST -= 1;
+            if self.ST == 0 { audio.stop(); }
         }
-
-        if self.ST == 0 { audio.stop(); }
     }
 }
 /*
@@ -450,9 +450,15 @@ impl Inst{
     }
 
     /*
-     * Decodes and executes proper opcode.
+     * Fetches, decodes and executes opcode.
      */
-    pub fn exec(&mut self, op: Op, state: &mut State) {
+    pub fn exec(&mut self, state: &mut State) {
+        // Fetch
+        let (upper, lower) = (state.mem[state.reg.PC as usize] as u16, state.mem[state.reg.PC as usize+1] as u16);
+        let op = (upper << 8) + lower;
+        state.reg.PC += 2;
+
+        // Decode
         let bits = ((op >> 12) & 0xF, (op >> 8) & 0xF, (op >> 4) & 0xF, op & 0xF);
         let key = match bits {
             (0x0, 0x0, 0xE, 0x0) => "00E0",
@@ -480,6 +486,7 @@ impl Inst{
             (0xD, _, _, _)       => "Dxyn",
             (0xE, _, 0x9, 0xE)   => "Ex9E",
             (0xE, _, 0xA, 0x1)   => "ExA1",
+            (0xF, _, 0x0, 0x7)   => "Fx07",
             (0xF, _, 0x0, 0xA)   => "Fx0A",
             (0xF, _, 0x1, 0x5)   => "Fx15",
             (0xF, _, 0x1, 0x8)   => "Fx18",
@@ -488,10 +495,12 @@ impl Inst{
             (0xF, _, 0x3, 0x3)   => "Fx33",
             (0xF, _, 0x5, 0x5)   => "Fx55",
             (0xF, _, 0x6, 0x5)   => "Fx65",
-            _ => panic!("Invalid insturction: {:?}", bits),
+            _ => panic!("Invalid insturction: {:?} | Hex: {:X}", bits, op),
         };
+
+        // Execute
         let func = self.instructions.get_mut(key)
-            .unwrap_or_else(|| panic!("Invalid insturction: {:?}", bits));
+            .unwrap_or_else(|| panic!("Invalid insturction: {:?} | Hex: {:X}", bits, op));
         func(bits, state);
     }
 }
@@ -513,6 +522,13 @@ fn map_keyboard(keyboard: &mut Keyboard, inp: &Input) {
 }
 
 fn main() {
+    if env::args().len() != 2 { panic!("Usage: {} [path]", env::args().nth(0).unwrap()); }
+
+    // Open File -> Read File -> Convert to vector of Opcodes
+    let filename = env::args().nth(1).unwrap();
+    let bytes = fs::read(path::Path::new(&filename))
+        .unwrap_or_else(|_| panic!("Unable to read {}", filename));
+
     // Assemble all VM components
     let mem = [0u8; RAM_SIZE];
     let reg = Reg::new();
@@ -523,15 +539,22 @@ fn main() {
     // And put them into State struct
     let mut state = State {mem: mem, reg: reg, display: display, audio: audio, key: key};
 
+    // Load bytes into memory
+    for (i, b) in bytes.into_iter().enumerate() { state.mem[ENTRY_POINT as usize + i] = b; }
+    state.reg.PC = ENTRY_POINT;
+
     // Inst struct let's you execute instructions.
     let mut inst = Inst::new();
-    inst.exec(0x00E0, &mut state);
 
     // Initialize Piston window
     let dimen = Size {width: state.display.s_width as f64, height: state.display.s_height as f64};
     let mut window: PistonWindow = WindowSettings::new("Chip-8 Emu", dimen)
         .exit_on_esc(true).resizable(false)
         .build().unwrap();
+
+    // These settings make timings more or less right
+    window.set_max_fps(30);
+    window.set_ups(420);
 
     while let Some(e) = window.next() {
         match e {
@@ -542,22 +565,22 @@ fn main() {
             /*
              * UPDATE
              */
-            Event::Loop(Loop::Update(_args)) => {
+            Event::Loop(Loop::Update(_)) => {
                 state.display.pixel(state.display.r_height-1, state.display.r_width-1, state.key[0]);
                 state.display.pixel(state.display.r_height-1, 0, state.key[0]);
                 state.display.pixel(0, 0, state.key[0]);
                 state.display.pixel(0, state.display.r_width-1, state.key[0]);
                 state.display.pixel(state.display.r_height/2, state.display.r_width/2, state.key[1]);
 
-                if state.key[2] {
-                    state.reg.ST = 180;
-                }
-                state.reg.update_ST(&state.audio)
+                inst.exec(&mut state);
+
+                state.reg.update_ST(&state.audio);
+                state.reg.update_DT();
             },
             /*
              * RENDER
              */
-            Event::Loop(Loop::Render(_args)) => {
+            Event::Loop(Loop::Render(_)) => {        
                 window.draw_2d(&e, |context, graphics, _| {
                     clear([0.0; 4], graphics);
 
