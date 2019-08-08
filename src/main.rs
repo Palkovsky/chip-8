@@ -1,13 +1,16 @@
 use std::default::Default;
 use std::collections::HashMap;
+use std::num::Wrapping;
 use std::{fs, env, path};
 use piston_window::*;
 use rodio::{Sink, Source};
+use rand::Rng;
 
 /*
  * TYPE ALIASES & CONSTS
  */
 type Mem = [u8; RAM_SIZE];
+type Stack = [u16; STACK_SIZE];
 type Keyboard = [bool; KEYBOARD_SIZE];
 type Op = u16;
 type ChunkedOp = (usize, usize, usize, usize);
@@ -15,11 +18,12 @@ type ChunkedOp = (usize, usize, usize, usize);
 const GP_REG_CNT: usize = 16;
 const KEYBOARD_SIZE: usize = 16;
 const RAM_SIZE: usize = 0x1000;
+const STACK_SIZE: usize = 16;
 
-const DISPLAY_MODE_WIDTH: usize = 128;
-const DISPLAY_MODE_HEIGHT: usize = 64;
-const DISPLAY_SCALED_WIDTH: usize = DISPLAY_MODE_WIDTH * 5;
-const DISPLAY_SCALED_HEIGHT: usize = DISPLAY_MODE_HEIGHT * 5;
+const DISPLAY_MODE_WIDTH: usize = 64;
+const DISPLAY_MODE_HEIGHT: usize = 32;
+const DISPLAY_SCALED_WIDTH: usize = DISPLAY_MODE_WIDTH * 10;
+const DISPLAY_SCALED_HEIGHT: usize = DISPLAY_MODE_HEIGHT * 10;
 const ENTRY_POINT: u16 = 0x200;
 
 /*
@@ -31,6 +35,7 @@ pub struct Reg {
      * General purpose regs.
      */
     pub V: [u8; GP_REG_CNT],
+    pub I: u16,
     /*
      * Flag register.
      */
@@ -132,8 +137,8 @@ impl Display {
     pub fn cls(&mut self) { self.buffer = vec![vec![false; self.s_width]; self.s_height]; }
 
     pub fn pixel(&mut self, row: usize, col: usize, update: bool) -> bool {
-        if row >= self.r_height { panic!("Tried accessing row {}. Only {} rows available.", row, self.r_height); }
-        if col >= self.r_width { panic!("Tried accessing column {}. Only {} columns available.", col, self.r_width); }
+        let row = row % self.r_height;
+        let col = col % self.r_width;
 
         let (x, y) = ((col as f64 * self.h_strech) as usize, (row as f64 * self.v_strech) as usize);
         let (width_scaled, height_scaled) = (self.h_strech as usize, self.v_strech as usize);
@@ -141,7 +146,7 @@ impl Display {
 
         for i in y..y+height_scaled {
             for j in x..x+width_scaled {
-               if self.buffer[i][j] != update { overlap = true; }
+               overlap |= self.buffer[i][j] != update;
                self.buffer[i][j] = update;
             }
         }
@@ -155,6 +160,7 @@ impl Display {
  */
 pub struct State {
     pub mem: Mem,
+    pub stack: Stack,
     pub reg: Reg,
     pub display: Display,
     pub audio: Audio,
@@ -170,13 +176,6 @@ impl Inst{
     pub fn new() -> Self {
         let instset: Vec<(&'static str, Box<FnMut(ChunkedOp, &mut State)>)> = vec![
             /*
-            * 0nnn - SYS addr
-            * Jump to a machine code routine at nnn.
-            */
-            ("0nnn", Box::new(|op, state| {
-
-            })),
-            /*
              * 00E0 - CLS
              * Clear the display.  
              */
@@ -186,187 +185,218 @@ impl Inst{
             * Return from a subroutine.
             * The interpreter sets the program counter to the address at the top of the stack, then subtracts 1 from the stack pointer.
             */
-            ("00EE", Box::new(|op, state| {
-
+            ("00EE", Box::new(|_, state| {
+                state.reg.PC = state.stack[state.reg.SP as usize];
+                state.reg.SP -= 1;
             })),
             /*
              * 1nnn - JP addr
              * Jump to location nnn.
              */
-            ("1nnn", Box::new(|op, state| {
-
+            ("1nnn", Box::new(|(_, a, b, c), state| {
+                let addr = ((a << 8) + (b << 4) + c) as u16;
+                state.reg.PC = addr;
             })),
             /*
             * 2nnn - CALL addr
             * Call subroutine at nnn.
             * The interpreter increments the stack pointer, then puts the current PC on the top of the stack. The PC is then set to nnn.
             */
-            ("2nnn", Box::new(|op, state| {
-
+            ("2nnn", Box::new(|(_, a, b, c), state| {
+                state.reg.SP += 1;
+                state.stack[state.reg.SP as usize] = state.reg.PC;
+                let addr = ((a << 8) + (b << 4) + c) as u16;
+                state.reg.PC = addr;
             })),
             /*
              * 3xkk - SE Vx, byte
              * Skip next instruction if Vx = kk.
              * The interpreter compares register Vx to kk, and if they are equal, increments the program counter by 2.
             */
-            ("3xkk", Box::new(|op, state| {
-
+            ("3xkk", Box::new(|(_, x, k1, k2), state| {
+                let kk = ((k1 << 4) + k2) as u8;
+                if state.reg.V[x] == kk {
+                    state.reg.PC += 2;
+                }
             })),
             /*
              * 4xkk - SNE Vx, byte
              * Skip next instruction if Vx != kk.
              * The interpreter compares register Vx to kk, and if they are not equal, increments the program counter by 2.
              */
-            ("4xkk", Box::new(|op, state| {
-
+            ("4xkk", Box::new(|(_, x, k1, k2), state| {
+                let kk = ((k1 << 4) + k2) as u8;
+                if state.reg.V[x] != kk {
+                    state.reg.PC += 2;
+                }
             })),
             /*
              * 5xy0 - SE Vx, Vy
              * Skip next instruction if Vx = Vy.
              * The interpreter compares register Vx to register Vy, and if they are equal, increments the program counter by 2.
              */
-            ("5xy0", Box::new(|op, state| {
-
+            ("5xy0", Box::new(|(_, x, y, _), state| {
+                if state.reg.V[x] == state.reg.V[y] {
+                    state.reg.PC += 2;
+                }
             })),
             /*
              * 6xkk - LD Vx, byte
              * Set Vx = kk.
              * The interpreter puts the value kk into register Vx.
              */
-            ("6xkk", Box::new(|op, state| {
-
+            ("6xkk", Box::new(|(_, x, k1, k2), state| {
+                let kk = ((k1 << 4) + k2) as u8;
+                state.reg.V[x] = kk;
             })),
             /*
              * 7xkk - ADD Vx, byte
              * Set Vx = Vx + kk.
              * Adds the value kk to the value of register Vx, then stores the result in Vx. 
              */
-            ("7xkk", Box::new(|op, state| {
-
+            ("7xkk", Box::new(|(_, x, k1, k2), state| {
+                let kk = ((k1 << 4) + k2) as u8;
+                state.reg.V[x] = (Wrapping(state.reg.V[x]) + Wrapping(kk)).0;
             })),
             /*
              * 8xy0 - LD Vx, Vy
              * Set Vx = Vy.
              * Stores the value of register Vy in register Vx.
              */
-            ("8xy0", Box::new(|op, state| {
-
+            ("8xy0", Box::new(|(_, x, y, _), state| {
+                state.reg.V[x] = state.reg.V[y];
             })),
             /*
              * 8xy1 - OR Vx, Vy
              * Set Vx = Vx OR Vy.
              * Performs a bitwise OR on the values of Vx and Vy, then stores the result in Vx. A bitwise OR compares the corrseponding bits from two values, and if either bit is 1, then the same bit in the result is also 1. Otherwise, it is 0. 
              */
-            ("8xy1", Box::new(|op, state| {
-
+            ("8xy1", Box::new(|(_, x, y, _), state| {
+                state.reg.V[x] |= state.reg.V[y];
             })),
             /*
              * 8xy2 - AND Vx, Vy
              * Set Vx = Vx AND Vy.
              * Performs a bitwise AND on the values of Vx and Vy, then stores the result in Vx. A bitwise AND compares the corrseponding bits from two values, and if both bits are 1, then the same bit in the result is also 1. Otherwise, it is 0. 
              */
-            ("8xy2", Box::new(|op, state| {
-
+            ("8xy2", Box::new(|(_, x, y, _), state| {
+                state.reg.V[x] &= state.reg.V[y];
             })),
             /*
              * 8xy3 - XOR Vx, Vy
              * Set Vx = Vx XOR Vy.
              * Performs a bitwise exclusive OR on the values of Vx and Vy, then stores the result in Vx. An exclusive OR compares the corrseponding bits from two values, and if the bits are not both the same, then the corresponding bit in the result is set to 1. Otherwise, it is 0. 
              */
-            ("8xy3", Box::new(|op, state| {
-
+            ("8xy3", Box::new(|(_, x, y, _), state| {
+                state.reg.V[x] ^= state.reg.V[y];
             })),
             /*
              * 8xy4 - ADD Vx, Vy
              * Set Vx = Vx + Vy, set VF = carry.
              * The values of Vx and Vy are added together. If the result is greater than 8 bits (i.e., > 255,) VF is set to 1, otherwise 0. Only the lowest 8 bits of the result are kept, and stored in Vx.
              */
-            ("8xy4", Box::new(|op, state| {
-
+            ("8xy4", Box::new(|(_, x, y, _), state| {
+                state.reg.VF = (state.reg.V[x] as u16 + state.reg.V[y] as u16) > 255;
+                state.reg.V[x] = (Wrapping(state.reg.V[x]) + Wrapping(state.reg.V[y])).0;
             })),
             /*
              * 8xy5 - SUB Vx, Vy
              * Set Vx = Vx - Vy, set VF = NOT borrow.
              * If Vx > Vy, then VF is set to 1, otherwise 0. Then Vy is subtracted from Vx, and the results stored in Vx.
              */
-            ("8xy5", Box::new(|op, state| {
-
+            ("8xy5", Box::new(|(_, x, y, _), state| {
+                state.reg.VF = state.reg.V[x] > state.reg.V[y];
+                state.reg.V[x] = (Wrapping(state.reg.V[x]) - Wrapping(state.reg.V[y])).0;
             })),
             /*
              * 8xy6 - SHR Vx {, Vy}
              * Set Vx = Vx SHR 1.
              * If the least-significant bit of Vx is 1, then VF is set to 1, otherwise 0. Then Vx is divided by 2.
              */
-            ("8xy6", Box::new(|op, state| {
-
+            ("8xy6", Box::new(|(_, x, _, _), state| {
+                state.reg.VF = state.reg.V[x] % 2 == 1;
+                state.reg.V[x] = state.reg.V[x] >> 1;
             })),
             /*
              * 8xy7 - SUBN Vx, Vy
              * Set Vx = Vy - Vx, set VF = NOT borrow.
              * If Vy > Vx, then VF is set to 1, otherwise 0. Then Vx is subtracted from Vy, and the results stored in Vx.
              */
-            ("8xy7", Box::new(|op, state| {
-
+            ("8xy7", Box::new(|(_, x, y, _), state| {
+                state.reg.VF = state.reg.V[y] > state.reg.V[x];
+                state.reg.V[x] = (Wrapping(state.reg.V[y]) - Wrapping(state.reg.V[x])).0;
             })),
             /*
              * 8xyE - SHL Vx {, Vy}
              * Set Vx = Vx SHL 1.
              * If the most-significant bit of Vx is 1, then VF is set to 1, otherwise to 0. Then Vx is multiplied by 2.
             */
-            ("8xyE", Box::new(|op, state| {
-
+            ("8xyE", Box::new(|(_, x, _, _), state| {
+                state.reg.VF = state.reg.V[x] & 0x80 != 0;
+                state.reg.V[x] = state.reg.V[x] << 1;
             })),
             /*
              * 9xy0 - SNE Vx, Vy
              * Skip next instruction if Vx != Vy.
              * The values of Vx and Vy are compared, and if they are not equal, the program counter is increased by 2.
              */
-            ("9xy0", Box::new(|op, state| {
-
+            ("9xy0", Box::new(|(_, x, y, _), state| {
+                if state.reg.V[x] != state.reg.V[y] {
+                    state.reg.PC += 2;
+                } 
             })),
             /*
              * Annn - LD I, addr
              * Set I = nnn.
              * The value of register I is set to nnn.
              */
-            ("Annn", Box::new(|op, state| {
-
+            ("Annn", Box::new(|(_, a, b, c), state| {
+                let val = ((a << 8) + (b << 4) + c) as u16;
+                state.reg.I = val;
             })),
             /*
              * Bnnn - JP V0, addr
              * Jump to location nnn + V0.
              * The program counter is set to nnn plus the value of V0.
              */
-            ("Bnnn", Box::new(|op, state| {
-
+            ("Bnnn", Box::new(|(_, a, b, c), state| {
+                let addr = ((a << 8) + (b << 4) + c) as u16;
+                state.reg.PC = addr + state.reg.V[0] as u16;
             })),
             /*
              * Cxkk - RND Vx, byte
              * Set Vx = random byte AND kk.
              * The interpreter generates a random number from 0 to 255, which is then ANDed with the value kk. The results are stored in Vx. See instruction 8xy2 for more information on AND.
              */
-            ("Cxkk", Box::new(|op, state| {
-
+            ("Cxkk", Box::new(|(_, x, k1, k2), state| {
+                let kk = ((k1 << 4) + k2) as u8;
+                let rnd = rand::thread_rng().gen::<u8>();
+                state.reg.V[x] = rnd & kk;
             })),
             /*
              * Dxyn - DRW Vx, Vy, nibble
              * Display n-byte sprite starting at memory location I at (Vx, Vy), set VF = collision.
-             * The interpreter reads n bytes from memory, starting at the address stored in I. These bytes are then displayed as sprites on screen at coordinates (Vx, Vy). Sprites are XORed onto the existing screen. If this causes any pixels to be erased, VF is set to 1, otherwise it is set to 0. If the sprite is positioned so part of it is outside the coordinates of the display, it wraps around to the opposite side of the screen. See instruction 8xy3 for more information on XOR, and section 2.4, Display, for more information on the Chip-8 screen and sprites.
+             * The interpreter reads n bytes from memory, starting at the address stored in I. These bytes are then displayed as sprites on screen at coordinates (Vx, Vy).
+             * Sprites are XORed onto the existing screen. If this causes any pixels to be erased, VF is set to 1, otherwise it is set to 0. If the sprite is positioned so part of it is outside the coordinates of the display, it wraps around to the opposite side of the screen.
+             * See instruction 8xy3 for more information on XOR, and section 2.4, Display, for more information on the Chip-8 screen and sprites.
              */
             ("Dxyn", Box::new(|(_, x, y, n), state| {                
-                let (mut row, mut col) = (y, x);
-                let addr = ((state.reg.V[x] as usize) << 8) + state.reg.V[y] as usize;
+                let addr = state.reg.I as usize;
                 let bytes = &state.mem[addr..addr+n];
+                state.reg.VF = false;
+
                 let mut mask = 0x80;
+                let mut row = state.reg.V[y] as usize;
+                let mut col = state.reg.V[x] as usize;
 
                 for byte in bytes {                    
                     while mask != 0 {
-                        state.reg.VF |= state.display.pixel(row, col, byte & mask != 0);
+                        state.reg.VF |= state.display.pixel(row, col, (byte & mask) != 0);
                         mask = mask >> 1;
                         col += 1;
                     }
                     row += 1;
-                    col = x;
+                    col = state.reg.V[x] as usize;
                     mask = 0x80;
                 }
             })),
@@ -375,88 +405,103 @@ impl Inst{
              * Skip next instruction if key with the value of Vx is pressed.
              * Checks the keyboard, and if the key corresponding to the value of Vx is currently in the down position, PC is increased by 2.
              */
-            ("Ex9E", Box::new(|op, state| {
-
+            ("Ex9E", Box::new(|(_, x, _, _), state| {
+                if state.key[state.reg.V[x] as usize] {
+                    state.reg.PC += 2;
+                }
             })),
             /*
              * ExA1 - SKNP Vx
              * Skip next instruction if key with the value of Vx is not pressed.
              * Checks the keyboard, and if the key corresponding to the value of Vx is currently in the up position, PC is increased by 2.
              */
-            ("ExA1", Box::new(|op, state| {
-
+            ("ExA1", Box::new(|(_, x, _, _), state| {
+                if !state.key[state.reg.V[x] as usize] {
+                    state.reg.PC += 2;
+                }
             })),
             /*
              * Fx07 - LD Vx, DT
              * Set Vx = delay timer value.
              * The value of DT is placed into Vx.
              */
-            ("Fx07", Box::new(|op, state| {
-
+            ("Fx07", Box::new(|(_, x, _, _), state| {
+                state.reg.V[x] = state.reg.DT;
             })),
             /*
              * Fx0A - LD Vx, K
              * Wait for a key press, store the value of the key in Vx.
              * All execution stops until a key is pressed, then the value of that key is stored in Vx.
              */
-            ("Fx0A", Box::new(|op, state| {
-
+            ("Fx0A", Box::new(|(_, x, _, _), state| {
+                panic!("Fx0A unsuporrted");
             })),
             /*
              * Fx15 - LD DT, Vx
              * Set delay timer = Vx.
              * DT is set equal to the value of Vx.
              */
-            ("Fx15", Box::new(|op, state| {
-
+            ("Fx15", Box::new(|(_, x, _, _), state| {
+                state.reg.DT = state.reg.V[x];
             })),
             /*
              * Fx18 - LD ST, Vx
              * Set sound timer = Vx.
              * ST is set equal to the value of Vx.
              */
-            ("Fx18", Box::new(|op, state| {
-
+            ("Fx18", Box::new(|(_, x, _, _), state| {
+                state.reg.ST = state.reg.V[x];
             })),
             /*
              * Fx1E - ADD I, Vx
              * Set I = I + Vx.
              * The values of I and Vx are added, and the results are stored in I.
              */
-            ("Fx1E", Box::new(|op, state| {
-
+            ("Fx1E", Box::new(|(_, x, _, _), state| {
+                state.reg.I = (Wrapping(state.reg.I) + Wrapping(state.reg.V[x] as u16)).0;
             })),
             /*
              * Fx29 - LD F, Vx
              * Set I = location of sprite for digit Vx.
              * The value of I is set to the location for the hexadecimal sprite corresponding to the value of Vx. See section 2.4, Display, for more information on the Chip-8 hexadecimal font.
              */
-            ("Fx29", Box::new(|op, state| {
-
+            ("Fx29", Box::new(|(_, x, _, _), state| {
+                let digit = state.reg.V[x] as u16;
+                state.reg.I = digit * 5;
             })),
             /*
              * Fx33 - LD B, Vx
              * Store BCD representation of Vx in memory locations I, I+1, and I+2.
              * The interpreter takes the decimal value of Vx, and places the hundreds digit in memory at location in I, the tens digit at location I+1, and the ones digit at location I+2.
              */
-            ("Fx33", Box::new(|op, state| {
-
+            ("Fx33", Box::new(|(_, x, _, _), state| {
+                let mut num = state.reg.V[x];
+                for i in 2..0 {
+                    state.mem[state.reg.I as usize + i] = num % 10;
+                    num /= 10;
+                }
             })),
             /*
              * Fx55 - LD [I], Vx
              * Store registers V0 through Vx in memory starting at location I.
              * The interpreter copies the values of registers V0 through Vx into memory, starting at the address in I.
              */
-            ("Fx55", Box::new(|op, state| {
-
+            ("Fx55", Box::new(|(_, x, _, _), state| {
+                let start = state.reg.I as usize;
+                for i in 0..x+1 {
+                    state.mem[start + i] = state.reg.V[i];
+                }
             })),
             /*
              * Fx65 - LD Vx, [I]
              * Read registers V0 through Vx from memory starting at location I.
              * The interpreter reads values from memory starting at location I into registers V0 through Vx.
              */
-            ("Fx65", Box::new(|op, state| {
-
+            ("Fx65", Box::new(|(_, x, _, _), state| {
+                let start = state.reg.I as usize;
+                for i in 0..x+1 {
+                    state.reg.V[i] = state.mem[start + i];
+                }
             })),
         ];
         
@@ -545,13 +590,14 @@ fn main() {
 
     // Assemble all VM components
     let mem = [0u8; RAM_SIZE];
+    let stack = [0u16; STACK_SIZE];
     let reg = Reg::new();
     let display = Display::new(DISPLAY_MODE_WIDTH, DISPLAY_SCALED_WIDTH, DISPLAY_MODE_HEIGHT, DISPLAY_SCALED_HEIGHT);
     let audio = Audio::new();
     let key = [false; KEYBOARD_SIZE];
 
     // And put them into State struct
-    let mut state = State {mem: mem, reg: reg, display: display, audio: audio, key: key};
+    let mut state = State {mem: mem, stack: stack, reg: reg, display: display, audio: audio, key: key};
 
     // Load bytes into memory
     for (i, b) in bytes.into_iter().enumerate() { state.mem[ENTRY_POINT as usize + i] = b; }
@@ -587,10 +633,6 @@ fn main() {
         .exit_on_esc(true).resizable(false)
         .build().unwrap();
 
-    // These settings make timings more or less right
-    window.set_max_fps(30);
-    window.set_ups(420);
-
     while let Some(e) = window.next() {
         match e {
             /*
@@ -601,21 +643,14 @@ fn main() {
              * UPDATE
              */
             Event::Loop(Loop::Update(_)) => {
-                state.display.pixel(state.display.r_height-1, state.display.r_width-1, state.key[0]);
-                state.display.pixel(state.display.r_height-1, 0, state.key[0]);
-                state.display.pixel(0, 0, state.key[0]);
-                state.display.pixel(0, state.display.r_width-1, state.key[0]);
-                state.display.pixel(state.display.r_height/2, state.display.r_width/2, state.key[1]);
-
-                inst.exec(&mut state);
-
-                state.reg.update_ST(&state.audio);
-                state.reg.update_DT();
+                    state.reg.update_ST(&state.audio);
+                    state.reg.update_DT();
+                    inst.exec(&mut state);
             },
             /*
              * RENDER
              */
-            Event::Loop(Loop::Render(_)) => {        
+            Event::Loop(Loop::Render(_)) => {      
                 window.draw_2d(&e, |context, graphics, _| {
                     clear([0.0; 4], graphics);
 
