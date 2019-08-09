@@ -37,10 +37,6 @@ pub struct Reg {
     pub V: [u8; GP_REG_CNT],
     pub I: u16,
     /*
-     * Flag register.
-     */
-    pub VF: bool,
-    /*
      *  The delay timer is active whenever the delay timer register (DT) is non-zero.
      *  This timer does nothing more than subtract 1 from the value of DT at a rate of 60Hz. 
      *  When DT reaches 0, it deactivates.
@@ -133,9 +129,11 @@ impl Display {
         let row = row % self.height;
         let col = col % self.width;
         
-        let overlap = self.buffer[row][col] != (self.buffer[row][col] ^ update);
-        self.buffer[row][col] ^= update;
-        overlap
+        let updated = self.buffer[row][col] ^ update;
+        let overriden = self.buffer[row][col] != updated;
+
+        self.buffer[row][col] = updated;
+        overriden
     }
 }
 /*
@@ -280,7 +278,7 @@ impl Inst{
              * The values of Vx and Vy are added together. If the result is greater than 8 bits (i.e., > 255,) VF is set to 1, otherwise 0. Only the lowest 8 bits of the result are kept, and stored in Vx.
              */
             ("8xy4", Box::new(|(_, x, y, _), state| {
-                state.reg.VF = (state.reg.V[x] as u16 + state.reg.V[y] as u16) > 255;
+                state.reg.V[0xF] = if (state.reg.V[x] as u16 + state.reg.V[y] as u16) > 255 {1} else {0};
                 state.reg.V[x] = (Wrapping(state.reg.V[x]) + Wrapping(state.reg.V[y])).0;
             })),
             /*
@@ -289,7 +287,7 @@ impl Inst{
              * If Vx > Vy, then VF is set to 1, otherwise 0. Then Vy is subtracted from Vx, and the results stored in Vx.
              */
             ("8xy5", Box::new(|(_, x, y, _), state| {
-                state.reg.VF = state.reg.V[x] > state.reg.V[y];
+                state.reg.V[0xF] = if state.reg.V[x] > state.reg.V[y] {1} else {0};
                 state.reg.V[x] = (Wrapping(state.reg.V[x]) - Wrapping(state.reg.V[y])).0;
             })),
             /*
@@ -298,7 +296,7 @@ impl Inst{
              * If the least-significant bit of Vx is 1, then VF is set to 1, otherwise 0. Then Vx is divided by 2.
              */
             ("8xy6", Box::new(|(_, x, _, _), state| {
-                state.reg.VF = state.reg.V[x] & 0x01 != 0;
+                state.reg.V[0xF] = if state.reg.V[x] & 0x01 != 0 {1} else {0};
                 state.reg.V[x] = state.reg.V[x] >> 1;
             })),
             /*
@@ -307,7 +305,7 @@ impl Inst{
              * If Vy > Vx, then VF is set to 1, otherwise 0. Then Vx is subtracted from Vy, and the results stored in Vx.
              */
             ("8xy7", Box::new(|(_, x, y, _), state| {
-                state.reg.VF = state.reg.V[y] > state.reg.V[x];
+                state.reg.V[0xF] = if state.reg.V[y] > state.reg.V[x] {1} else {0};
                 state.reg.V[x] = (Wrapping(state.reg.V[y]) - Wrapping(state.reg.V[x])).0;
             })),
             /*
@@ -316,7 +314,7 @@ impl Inst{
              * If the most-significant bit of Vx is 1, then VF is set to 1, otherwise to 0. Then Vx is multiplied by 2.
             */
             ("8xyE", Box::new(|(_, x, _, _), state| {
-                state.reg.VF = state.reg.V[x] & 0x80 != 0;
+                state.reg.V[0xF] = if state.reg.V[x] & 0x80 != 0 {1} else {0};
                 state.reg.V[x] = state.reg.V[x] << 1;
             })),
             /*
@@ -335,7 +333,7 @@ impl Inst{
              * The value of register I is set to nnn.
              */
             ("Annn", Box::new(|(_, a, b, c), state| {
-                let val = ((a << 8) + (b << 4) + c) as u16;
+                let val = ((a as u16) << 8) + ((b as u16) << 4) + c as u16;
                 state.reg.I = val;
             })),
             /*
@@ -366,21 +364,20 @@ impl Inst{
             ("Dxyn", Box::new(|(_, x, y, n), state| {                
                 let addr = state.reg.I as usize;
                 let bytes = &state.mem[addr..addr+n];
-                state.reg.VF = true;
+                
+                state.reg.V[0xF] = 0;
 
-                let mut mask = 0x80;
                 let mut row = state.reg.V[y] as usize;
-                let mut col = state.reg.V[x] as usize;
-
-                for byte in bytes {                    
+                for byte in bytes {  
+                    let mut mask = 0x80; 
+                    let mut col = state.reg.V[x] as usize;
                     while mask != 0 {
-                        state.reg.VF |= state.display.pixel(row, col, (byte & mask) != 0);
+                        if state.display.pixel(row, col, (byte & mask) != 0)  
+                            { state.reg.V[0xF] = 0; }
                         mask = mask >> 1;
                         col += 1;
                     }
                     row += 1;
-                    col = state.reg.V[x] as usize;
-                    mask = 0x80;
                 }
             })),
             /*
@@ -627,11 +624,11 @@ fn main() {
              * UPDATE
              */
             Event::Loop(Loop::Update(_)) => {
-                //for i in 0..5 {
+                for _ in 0..5 {
                     state.reg.update_ST(&state.audio);
                     state.reg.update_DT();
                     inst.exec(&mut state);
-                //}
+                }
             },
             /*
              * RENDER
