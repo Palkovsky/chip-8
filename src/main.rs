@@ -130,7 +130,7 @@ impl Display {
         let col = col % self.width;
         
         let updated = self.buffer[row][col] ^ update;
-        let overriden = self.buffer[row][col] != updated;
+        let overriden = self.buffer[row][col] != update;
 
         self.buffer[row][col] = updated;
         overriden
@@ -361,7 +361,7 @@ impl Inst{
              * The interpreter reads n bytes from memory, starting at the address stored in I. These bytes are then displayed as sprites on screen at coordinates (Vx, Vy).
              * Sprites are XORed onto the existing screen. If this causes any pixels to be erased, VF is set to 1, otherwise it is set to 0. If the sprite is positioned so part of it is outside the coordinates of the display, it wraps around to the opposite side of the screen.
              */
-            ("Dxyn", Box::new(|(_, x, y, n), state| {                
+            ("Dxyn", Box::new(|(_, x, y, n), state| {
                 let addr = state.reg.I as usize;
                 let bytes = &state.mem[addr..addr+n];
                 
@@ -372,10 +372,11 @@ impl Inst{
                     let mut mask = 0x80; 
                     let mut col = state.reg.V[x] as usize;
                     while mask != 0 {
-                        if state.display.pixel(row, col, (byte & mask) != 0)  
-                            { state.reg.V[0xF] = 0; }
+                        if byte & mask != 0 && state.display.buffer[row][col] { state.reg.V[0xF] = 1; }
+                        state.display.pixel(row, col, byte & mask != 0);
                         mask = mask >> 1;
                         col += 1;
+
                     }
                     row += 1;
                 }
