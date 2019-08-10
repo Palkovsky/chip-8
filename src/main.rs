@@ -112,6 +112,7 @@ impl Audio {
 pub struct Display {
     pub width: usize,
     pub height: usize,
+    pub readraw: bool,
     buffer: Vec<Vec<bool>>,
 }
 
@@ -119,20 +120,23 @@ impl Display {
     pub fn new(width: usize, height: usize) -> Self {
         Display { 
             width: width, height: height,
-            buffer: vec![vec![false; width]; height]
+            buffer: vec![vec![false; width]; height],
+            readraw: true,
         }
     }
 
-    pub fn cls(&mut self) { self.buffer = vec![vec![false; self.width]; self.height]; }
+    pub fn cls(&mut self) { 
+        self.buffer = vec![vec![false; self.width]; self.height]; 
+        self.readraw = true;
+    }
 
     pub fn pixel(&mut self, row: usize, col: usize, update: bool) -> bool {
         let row = row % self.height;
-        let col = col % self.width;
-        
-        let updated = self.buffer[row][col] ^ update;
-        let overriden = self.buffer[row][col] != update;
+        let col = col % self.width;        
+        let overriden = self.buffer[row][col] && update;
 
-        self.buffer[row][col] = updated;
+        self.buffer[row][col] ^= update;
+        self.readraw |= update;
         overriden
     }
 }
@@ -161,7 +165,7 @@ impl Inst{
              * 00E0 - CLS
              * Clear the display.  
              */
-            ("00E0", Box::new(|_, state| state.display.cls())),
+            ("00E0", Box::new(|_, state|  state.display.cls())),
             /*
             * 00EE - RET
             * Return from a subroutine.
@@ -359,7 +363,7 @@ impl Inst{
              * Dxyn - DRW Vx, Vy, nibble
              * Display n-byte sprite starting at memory location I at (Vx, Vy), set VF = collision.
              * The interpreter reads n bytes from memory, starting at the address stored in I. These bytes are then displayed as sprites on screen at coordinates (Vx, Vy).
-             * Sprites are XORed onto the existing screen. If this causes any pixels to be erased, VF is set to 1, otherwise it is set to 0. If the sprite is positioned so part of it is outside the coordinates of the display, it wraps around to the opposite side of the screen.
+             * Sprites are XORed onto  the existing screen. If this causes any pixels to be erased, VF is set to 1, otherwise it is set to 0. If the sprite is positioned so part of it is outside the coordinates of the display, it wraps around to the opposite side of the screen.
              */
             ("Dxyn", Box::new(|(_, x, y, n), state| {
                 let addr = state.reg.I as usize;
@@ -367,16 +371,14 @@ impl Inst{
                 
                 state.reg.V[0xF] = 0;
 
-                let mut row = state.reg.V[y] as usize;
+                let mut row = state.reg.V[y] as usize ;
                 for byte in bytes {  
                     let mut mask = 0x80; 
                     let mut col = state.reg.V[x] as usize;
                     while mask != 0 {
-                        if byte & mask != 0 && state.display.buffer[row][col] { state.reg.V[0xF] = 1; }
-                        state.display.pixel(row, col, byte & mask != 0);
+                        if state.display.pixel(row, col, byte & mask != 0) { state.reg.V[0xF] = 1; }
                         mask = mask >> 1;
                         col += 1;
-
                     }
                     row += 1;
                 }
@@ -615,6 +617,8 @@ fn main() {
         .exit_on_esc(true).resizable(false)
         .build().unwrap();
 
+    window.set_ups(60);
+
     while let Some(e) = window.next() {
         match e {
             /*
@@ -625,7 +629,8 @@ fn main() {
              * UPDATE
              */
             Event::Loop(Loop::Update(_)) => {
-                for _ in 0..5 {
+                for _ in 0..8 {
+                    if state.display.readraw { break; }
                     state.reg.update_ST(&state.audio);
                     state.reg.update_DT();
                     inst.exec(&mut state);
@@ -635,22 +640,25 @@ fn main() {
              * RENDER
              */
             Event::Loop(Loop::Render(_)) => {  
-                let h_strech = (DISPLAY_SCALED_WIDTH as f64)/(state.display.width as f64);
-                let v_strech = (DISPLAY_SCALED_HEIGHT as f64)/(state.display.height as f64);
-    
-                window.draw_2d(&e, |context, graphics, _| {
-                    clear([0.0; 4], graphics);
-                    for i in 0..state.display.height {
-                        for j in 0..state.display.width {
-                            let x = (j as f64) * h_strech;
-                            let y = (i as f64) * v_strech;
+                if state.display.readraw {
+                    let h_strech = (DISPLAY_SCALED_WIDTH as f64)/(state.display.width as f64);
+                    let v_strech = (DISPLAY_SCALED_HEIGHT as f64)/(state.display.height as f64);
+        
+                    window.draw_2d(&e, |context, graphics, _| {
+                        clear([0.0; 4], graphics);
+                        for i in 0..state.display.height {
+                            for j in 0..state.display.width {
+                                let x = (j as f64) * h_strech;
+                                let y = (i as f64) * v_strech;
 
-                            if state.display.buffer[i][j] {
-                                rectangle([1.0; 4], [x, y, h_strech, v_strech], context.transform, graphics);
+                                if state.display.buffer[i][j] {
+                                    rectangle([1.0; 4], [x, y, h_strech, v_strech], context.transform, graphics);
+                                }
                             }
                         }
-                    }
-                });
+                    });
+                }
+                state.display.readraw = false;
             },
             _ => {}
         }
