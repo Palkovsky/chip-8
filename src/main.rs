@@ -151,6 +151,9 @@ pub struct State {
     pub display: Display,
     pub audio: Audio,
     pub key: Keyboard,
+
+    // Index of register to put key idx into
+    pub awaiting_input: u8,
 }
 /*
  * INSTRUCTIONS
@@ -417,8 +420,7 @@ impl Inst{
              * All execution stops until a key is pressed, then the value of that key is stored in Vx.
              */
             ("Fx0A", Box::new(|(_, x, _, _), state| {
-                //panic!("Fx0A unsuporrted");
-                state.reg.V[x] = 1;
+                state.awaiting_input = x as u8;
             })),
             /*
              * Fx15 - LD DT, Vx
@@ -459,9 +461,10 @@ impl Inst{
              * The interpreter takes the decimal value of Vx, and places the hundreds digit in memory at location in I, the tens digit at location I+1, and the ones digit at location I+2.
              */
             ("Fx33", Box::new(|(_, x, _, _), state| {
+                let start = state.reg.I as usize;
                 let mut num = state.reg.V[x];
-                for i in 2..0 {
-                    state.mem[state.reg.I as usize + i] = num % 10;
+                for i in (0..3).rev() {
+                    state.mem[start + i] = num % 10;
                     num /= 10;
                 }
             })),
@@ -548,7 +551,10 @@ impl Inst{
     }
 }
 
-fn map_keyboard(keyboard: &mut Keyboard, inp: &Input) {
+/*
+ * Updates keybord map. Returns one of detected keys for awaiting input functionality.
+ */
+fn map_keyboard(keyboard: &mut Keyboard, inp: &Input) -> u8 {
     let translation: HashMap<Key, usize> = vec![
         Key::D1, Key::D2, Key::D3, Key::D4,
         Key::Q, Key::W, Key::E, Key::R,
@@ -556,12 +562,17 @@ fn map_keyboard(keyboard: &mut Keyboard, inp: &Input) {
         Key::Z, Key::X, Key::C, Key::V,
     ].into_iter().enumerate().map(|(i, key)| (key, i)).collect();
 
+    let mut res: u8 = 0xFF;
     if let Input::Button(but) = inp {
         if let Button::Keyboard(key) = but.button {
             let pressed = but.state == ButtonState::Press;
-            if let Some(idx) = translation.get(&key) { keyboard[*idx] = pressed; }
+            if let Some(idx) = translation.get(&key) { 
+                keyboard[*idx] = pressed;
+                res = (*idx) as u8;
+            }
         }
     }
+    res
 }
 
 fn main() {
@@ -581,7 +592,7 @@ fn main() {
     let key = [false; KEYBOARD_SIZE];
 
     // And put them into State struct
-    let mut state = State {mem: mem, stack: stack, reg: reg, display: display, audio: audio, key: key};
+    let mut state = State {mem: mem, stack: stack, reg: reg, display: display, audio: audio, key: key, awaiting_input: 0xFF};
 
     // Load bytes to memory
     for (i, b) in bytes.into_iter().enumerate() { state.mem[ENTRY_POINT as usize + i] = b; }
@@ -597,7 +608,7 @@ fn main() {
         0xF0, 0x80, 0xF0, 0x10, 0xF0, // 5
         0xF0, 0x80, 0xF0, 0x90, 0xF0, // 6
         0xF0, 0x10, 0x20, 0x40, 0x40, // 7
-        0xF0, 0x90, 0xF0, 0x90, 0x90, // 8
+        0xF0, 0x90, 0xF0, 0x90, 0xF0, // 8
         0xF0, 0x90, 0xF0, 0x10, 0xF0, // 9
         0xF0, 0x90, 0xF0, 0x90, 0x90, // A
         0xE0, 0x90, 0xE0, 0x90, 0xE0, // B
@@ -618,23 +629,30 @@ fn main() {
         .build().unwrap();
 
     window.set_ups(60);
+    window.set_max_fps(30);
 
     while let Some(e) = window.next() {
         match e {
             /*
              * INPUT
              */
-            Event::Input(inp, _) =>  { map_keyboard(&mut state.key, &inp); },
+            Event::Input(inp, _) =>  { 
+                let pressed = map_keyboard(&mut state.key, &inp);
+                if state.awaiting_input != 0xFF && pressed != 0xFF {
+                    state.reg.V[state.awaiting_input as usize] = pressed;
+                    state.awaiting_input = 0xFF;
+                }
+            },
             /*
              * UPDATE
              */
             Event::Loop(Loop::Update(_)) => {
-                for _ in 0..8 {
-                    if state.display.readraw { break; }
-                    state.reg.update_ST(&state.audio);
-                    state.reg.update_DT();
+                for _ in 0..9 {
+                    if state.awaiting_input <= 0xF { break; }
                     inst.exec(&mut state);
                 }
+                state.reg.update_ST(&state.audio);
+                state.reg.update_DT();
             },
             /*
              * RENDER
