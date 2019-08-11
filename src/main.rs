@@ -1,10 +1,15 @@
 use std::default::Default;
 use std::collections::HashMap;
 use std::num::Wrapping;
-use std::{fs, env, path};
-use piston_window::*;
+use std::time::Duration;
+use std::{fs, env, path, thread};
 use rodio::{Sink, Source};
 use rand::Rng;
+
+use sdl2::pixels::Color;
+use sdl2::event::Event;
+use sdl2::keyboard::Keycode;
+use sdl2::rect::Rect;
 
 /*
  * TYPE ALIASES & CONSTS
@@ -554,28 +559,29 @@ impl Inst{
 /*
  * Updates keybord map. Returns one of detected keys for awaiting input functionality.
  */
-fn map_keyboard(keyboard: &mut Keyboard, inp: &Input) -> u8 {
-    let translation: HashMap<Key, usize> = vec![
-        Key::D1, Key::D2, Key::D3, Key::D4,
-        Key::Q, Key::W, Key::E, Key::R,
-        Key::A, Key::S, Key::D, Key::F,
-        Key::Z, Key::X, Key::C, Key::V,
+fn map_keyboard(keyboard: &mut Keyboard, events: &mut sdl2::EventPump) -> u8 {
+    let translation: HashMap<Keycode, usize> = vec![
+        Keycode::Num1, Keycode::Num2, Keycode::Num3, Keycode::Num4,
+        Keycode::Q, Keycode::W, Keycode::E, Keycode::R,
+        Keycode::A, Keycode::S, Keycode::D, Keycode::F,
+        Keycode::Z, Keycode::X, Keycode::C, Keycode::V,
     ].into_iter().enumerate().map(|(i, key)| (key, i)).collect();
 
     let mut res: u8 = 0xFF;
-    if let Input::Button(but) = inp {
-        if let Button::Keyboard(key) = but.button {
-            let pressed = but.state == ButtonState::Press;
-            if let Some(idx) = translation.get(&key) { 
-                keyboard[*idx] = pressed;
-                res = (*idx) as u8;
-            }
+    let keys: Vec<Keycode> = events.keyboard_state().pressed_scancodes()
+        .filter_map(Keycode::from_scancode).collect();
+    
+    for i in 0..keyboard.len() { keyboard[i] = false; }
+    for keycode in keys {
+        if let Some(idx) = translation.get(&keycode) {
+            keyboard[*idx] = true;
+            res = (*idx) as u8;
         }
     }
     res
 }
 
-fn main() {
+fn main() -> Result<(), String> {
     if env::args().len() != 2 { panic!("Usage: {} [path]", env::args().nth(0).unwrap()); }
 
     // Open File -> Read File -> Convert to vector of Opcodes
@@ -622,63 +628,72 @@ fn main() {
     // Inst struct let's you execute instructions.
     let mut inst = Inst::new();
 
-    // Initialize Piston window
-    let dimen = Size {width: DISPLAY_SCALED_WIDTH as f64, height: DISPLAY_SCALED_HEIGHT as f64};
-    let mut window: PistonWindow = WindowSettings::new("Chip-8 Emu", dimen)
-        .exit_on_esc(true).resizable(false)
-        .build().unwrap();
+    let sdl_context = sdl2::init()?;
+    let video_subsystem = sdl_context.video()?;
 
-    window.set_ups(60);
-    window.set_max_fps(30);
+    let window = video_subsystem.window("Chip-8 emu", DISPLAY_SCALED_WIDTH as u32, DISPLAY_SCALED_HEIGHT as u32)
+        .position_centered().opengl()
+        .build()
+        .map_err(|e| e.to_string())?;
+    
+    let mut events = sdl_context.event_pump()?;
 
-    while let Some(e) = window.next() {
-        match e {
-            /*
-             * INPUT
-             */
-            Event::Input(inp, _) =>  { 
-                let pressed = map_keyboard(&mut state.key, &inp);
-                if state.awaiting_input != 0xFF && pressed != 0xFF {
-                    state.reg.V[state.awaiting_input as usize] = pressed;
-                    state.awaiting_input = 0xFF;
-                }
-            },
-            /*
-             * UPDATE
-             */
-            Event::Loop(Loop::Update(_)) => {
-                for _ in 0..9 {
-                    if state.awaiting_input <= 0xF { break; }
-                    inst.exec(&mut state);
-                }
-                state.reg.update_ST(&state.audio);
-                state.reg.update_DT();
-            },
-            /*
-             * RENDER
-             */
-            Event::Loop(Loop::Render(_)) => {  
-                if state.display.readraw {
-                    let h_strech = (DISPLAY_SCALED_WIDTH as f64)/(state.display.width as f64);
-                    let v_strech = (DISPLAY_SCALED_HEIGHT as f64)/(state.display.height as f64);
-        
-                    window.draw_2d(&e, |context, graphics, _| {
-                        clear([0.0; 4], graphics);
-                        for i in 0..state.display.height {
-                            for j in 0..state.display.width {
-                                let x = (j as f64) * h_strech;
-                                let y = (i as f64) * v_strech;
+    let mut canvas = window.into_canvas().build().map_err(|e| e.to_string())?;
+    canvas.set_draw_color(Color::RGB(0, 0, 0));
+    canvas.clear();
+    canvas.present();
 
-                                if state.display.buffer[i][j] {
-                                    rectangle([1.0; 4], [x, y, h_strech, v_strech], context.transform, graphics);
-                                }
-                            }
-                        }
-                    });
-                }
-                state.display.readraw = false;
-            },
-            _ => {}
+    let h_strech = (DISPLAY_SCALED_WIDTH as f64)/(state.display.width as f64);
+    let v_strech = (DISPLAY_SCALED_HEIGHT as f64)/(state.display.height as f64);
+
+    'emulating: loop {
+        /*
+         * INPUT
+         */
+        for event in events.poll_iter() {
+            if let Event::Quit {..}  |  Event::KeyDown { keycode: Some(Keycode::Escape), .. } = event {
+                 break 'emulating; 
+            }
         }
+        let pressed = map_keyboard(&mut state.key, &mut events);
+        if pressed != 0xFF && state.awaiting_input != 0xFF {
+            state.reg.V[state.awaiting_input as usize] = pressed;
+            state.awaiting_input = 0xFF;
+        }
+
+        /*
+         * UPDATE
+         */
+        for _ in 0..9 {
+            if state.awaiting_input <= 0xF { break; }
+            inst.exec(&mut state);
+        }
+        if state.awaiting_input == 0xFF {
+            state.reg.update_ST(&state.audio);
+            state.reg.update_DT();
+        }
+
+        /*
+         * RENDER
+         */
+        canvas.set_draw_color(Color::RGB(0, 0, 0));
+        canvas.clear();
+        canvas.set_draw_color(Color::RGB(255, 255, 255));
+        for i in 0..state.display.height {
+            for j in 0..state.display.width {
+                let x = (j as f64) * h_strech;
+                let y = (i as f64) * v_strech;
+
+                if state.display.buffer[i][j] {
+                    let rect = Rect::new(x as i32, y as i32, h_strech as u32, v_strech as u32);
+                    canvas.fill_rect(rect)?;
+                }
+            }
+        }
+        canvas.present();
+
+        thread::sleep(Duration::new(0, (1000000000.0/60.0) as u32));
     }
+
+    Ok(())
 }
