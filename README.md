@@ -14,10 +14,13 @@ Chip 8 emulator written in Rust as language learning exercise.
 All roms came from [here](https://github.com/dmatlack/chip8/tree/master/roms).
 
 ![UFO](1.png)
+
 UFO
 
 ![Breakout](2.png)
+
 Breakout
 
 ![Space Invaders](3.png)
+
 Space Invaders
